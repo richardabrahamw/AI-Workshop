@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Usage Counter</title>
+<style>
+  :root{--bg:#f7fafc;--card:#ffffff;--accent:#0b74de;--muted:#6b7280;--danger:#b91c1c;}
+  html,body{height:100%}
+  body{
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    background: linear-gradient(180deg,var(--bg),#eef2f7 120px);
+    margin:0; display:flex; align-items:center; justify-content:center; padding:28px;
+    color:#0f172a;
+  }
+  .wrap{
+    width:100%; max-width:520px; background:var(--card); border-radius:12px; box-shadow:0 6px 24px rgba(11,20,40,0.06);
+    padding:20px; box-sizing:border-box;
+  }
+  h1{font-size:1.125rem; margin:0 0 6px 0}
+  p.lead{margin:0 0 14px 0; color:var(--muted); font-size:0.95rem}
+  .row{display:flex; gap:8px; align-items:center}
+  input[type="text"]{
+    flex:1; padding:10px 12px; border-radius:8px; border:1px solid #e6eef8;
+    font-size:0.95rem; outline:none; box-shadow:none;
+  }
+  button{
+    padding:9px 12px; border-radius:8px; border:0; background:var(--accent); color:white; cursor:pointer;
+    font-weight:600; font-size:0.92rem;
+  }
+  button.tert{background:#eef2f7; color:#023b66; border:1px solid #d3e7fb}
+  button.warn{background:transparent; color:var(--danger); border:1px solid rgba(185,28,28,0.08)}
+  button:disabled{opacity:0.55; cursor:not-allowed}
+  .controls{display:flex; gap:8px; margin-top:12px; flex-wrap:wrap}
+  .count-box{
+    margin-top:18px; padding:16px; border-radius:10px; background:linear-gradient(180deg,#fbfeff,#f6fbff);
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    border:1px solid #eef7ff;
+  }
+  .count-label{color:var(--muted); font-size:0.9rem}
+  .count-value{font-weight:700; font-size:1.5rem}
+  .status{
+    margin-top:12px; min-height:1.2em; color:var(--danger); font-weight:600;
+    font-size:0.92rem;
+  }
+  .muted-note{margin-top:10px; font-size:0.82rem; color:var(--muted)}
+  .small{font-size:0.82rem}
+</style>
+</head>
+<body>
+  <main class="wrap" role="main" aria-labelledby="title">
+    <h1 id="title">Usage counter</h1>
+    <p class="lead">Enter a name, press <strong>Start</strong> to begin. Use Increment or Refresh; Forget removes the saved name.</p>
+
+    <div class="row">
+      <input id="nameInput" type="text" autocomplete="off" placeholder="Enter a name (alphanumeric, spaces allowed)" />
+      <button id="startBtn" title="Start and send first increment">Start</button>
+    </div>
+
+    <div class="controls" style="margin-top:12px">
+      <button id="incBtn" class="tert" disabled>Increment</button>
+      <button id="refreshBtn" class="tert" disabled>Refresh</button>
+      <button id="forgetBtn" class="warn" disabled>Forget</button>
+    </div>
+
+    <div class="count-box" aria-live="polite">
+      <div>
+        <div class="count-label small">Current count for</div>
+        <div id="currentName" class="small" style="font-weight:600; color:#0b2b44">—</div>
+      </div>
+      <div style="text-align:right">
+        <div class="count-label small">Count</div>
+        <div id="countValue" class="count-value">—</div>
+      </div>
+    </div>
+
+    <div id="status" class="status" role="status" aria-live="assertive"></div>
+    <div class="muted-note small">Note: This UI only shows warnings or errors. Successful operations update the count silently.</div>
+  </main>
+
+<script>
+(function(){
+  // Config
+  const POST_URL = 'https://api.magiqspark.com/counter/';
+  const GET_URL  = 'https://api.magiqspark.com/counter/';
+
+  // UI
+  const nameInput = document.getElementById('nameInput');
+  const startBtn = document.getElementById('startBtn');
+  const incBtn = document.getElementById('incBtn');
+  const refreshBtn = document.getElementById('refreshBtn');
+  const forgetBtn = document.getElementById('forgetBtn');
+  const currentNameEl = document.getElementById('currentName');
+  const countValueEl = document.getElementById('countValue');
+  const statusEl = document.getElementById('status');
+
+  // State
+  let savedName = null;
+  let inFlight = false;
+
+  // Helpers
+  function setStatusError(message){
+    statusEl.textContent = message || '';
+  }
+  function clearStatus(){
+    statusEl.textContent = '';
+  }
+  function setButtonsForName(active){
+    incBtn.disabled = !active;
+    refreshBtn.disabled = !active;
+    forgetBtn.disabled = !active;
+    startBtn.disabled = false;
+  }
+  function updateNameUI(name){
+    currentNameEl.textContent = name ? name : '—';
+  }
+  function updateCountUI(value){
+    countValueEl.textContent = (value === null || value === undefined) ? '—' : String(value);
+  }
+  function disableAllDuringRequest(flag){
+    inFlight = flag;
+    startBtn.disabled = flag;
+    incBtn.disabled = flag || !savedName;
+    refreshBtn.disabled = flag || !savedName;
+    forgetBtn.disabled = flag || !savedName;
+  }
+
+  // Robust JSON numeric extractor:
+  function pickNumericFrom(obj){
+    if (obj === null || obj === undefined) return null;
+    if (typeof obj === 'number') return obj;
+    if (typeof obj === 'string' && !isNaN(Number(obj))) return Number(obj);
+    if (typeof obj === 'object'){
+      // common keys
+      const keys = ['count','value','total','result','hits','current','usage'];
+      for (const k of keys){
+        if (k in obj && typeof obj[k] === 'number') return obj[k];
+        if (k in obj && typeof obj[k] === 'string' && !isNaN(Number(obj[k]))) return Number(obj[k]);
+      }
+      // otherwise first numeric property
+      for (const k of Object.keys(obj)){
+        if (typeof obj[k] === 'number') return obj[k];
+        if (typeof obj[k] === 'string' && !isNaN(Number(obj[k]))) return Number(obj[k]);
+      }
+    }
+    return null;
+  }
+
+  // Network actions
+  async function doPostIncrement(name){
+    // POST { name } as JSON
+    const body = JSON.stringify({ name: name });
+    const resp = await fetch(POST_URL, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: body,
+      credentials: 'include'
+    });
+    if (!resp.ok) {
+      const txt = await safeText(resp);
+      throw new Error(txt || `Increment failed (status ${resp.status})`);
+    }
+    // try parse but POST result may be ignored; we'll GET anyway.
+    return resp;
+  }
+
+  async function doGetCount(name){
+    // GET with query param ?name=...
+    const url = GET_URL + '?name=' + encodeURIComponent(name);
+    const resp = await fetch(url, { method:'GET', credentials:'include' });
+    if (!resp.ok){
+      const txt = await safeText(resp);
+      throw new Error(txt || `Fetch failed (status ${resp.status})`);
+    }
+    // try JSON then fallback to text/number
+    let data;
+    const ct = resp.headers.get('content-type') || '';
+    if (ct.includes('application/json')){
+      data = await resp.json();
+    } else {
+      const t = await resp.text();
+      // try parse as JSON
+      try { data = JSON.parse(t); }
+      catch(e){ data = t.trim(); }
+    }
+    // Extract numeric
+    const num = pickNumericFrom(data);
+    if (num === null) {
+      // if response was a simple number string, try parse as number
+      if (typeof data === 'string' && !isNaN(Number(data))) return Number(data);
+      throw new Error('Could not parse count from response.');
+    }
+    return num;
+  }
+
+  async function safeText(resp){
+    try { return await resp.text(); } catch(e){ return ''; }
+  }
+
+  // Actions wired to UI
+  async function startWithName(name, fromAuto=false){
+    clearStatus();
+    name = (name||'').trim();
+    if (!name) { setStatusError('Please enter a non-empty name.'); return; }
+    savedName = name;
+    updateNameUI(savedName);
+    // disable buttons while working
+    disableAllDuringRequest(true);
+    try {
+      // POST increment
+      await doPostIncrement(savedName);
+      // GET updated count
+      const count = await doGetCount(savedName);
+      updateCountUI(count);
+      // on success, leave status blank (per instruction: no success lines)
+      clearStatus();
+    } catch (err){
+      // show only warnings/errors
+      setStatusError(String(err.message || err));
+      // clear count if failure to avoid stale info? keep name shown.
+      updateCountUI('—');
+    } finally {
+      disableAllDuringRequest(false);
+      setButtonsForName(Boolean(savedName));
+    }
+  }
+
+  async function incrementAction(){
+    if (!savedName) return;
+    clearStatus();
+    disableAllDuringRequest(true);
+    // briefly show "..." to indicate activity without logging success
+    updateCountUI('…');
+    try {
+      await doPostIncrement(savedName);
+      const count = await doGetCount(savedName);
+      updateCountUI(count);
+      clearStatus();
+    } catch (err){
+      setStatusError(String(err.message || err));
+      updateCountUI('—');
+    } finally {
+      disableAllDuringRequest(false);
+    }
+  }
+
+  async function refreshAction(){
+    if (!savedName) return;
+    clearStatus();
+    disableAllDuringRequest(true);
+    updateCountUI('…');
+    try {
+      const count = await doGetCount(savedName);
+      updateCountUI(count);
+      clearStatus();
+    } catch (err){
+      setStatusError(String(err.message || err));
+      updateCountUI('—');
+    } finally {
+      disableAllDuringRequest(false);
+    }
+  }
+
+  function forgetAction(){
+    savedName = null;
+    updateNameUI(null);
+    updateCountUI(null);
+    nameInput.value = '';
+    setButtonsForName(false);
+    clearStatus();
+  }
+
+  // Event wiring
+  startBtn.addEventListener('click', ()=> startWithName(nameInput.value) );
+  incBtn.addEventListener('click', incrementAction);
+  refreshBtn.addEventListener('click', refreshAction);
+  forgetBtn.addEventListener('click', forgetAction);
+
+  // Enter starts
+  nameInput.addEventListener('keydown', (e)=>{
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      startBtn.click();
+    }
+  });
+
+  // Init state
+  setButtonsForName(false);
+  updateCountUI(null);
+  updateNameUI(null);
+
+  // Support ?name=foo auto-start
+  function getQueryName(){
+    try {
+      const p = new URLSearchParams(window.location.search);
+      const n = p.get('name');
+      return n ? String(n) : null;
+    } catch(e){ return null; }
+  }
+
+  // On load: if ?name=... present, prefill and auto-start
+  window.addEventListener('load', ()=>{
+    const q = getQueryName();
+    if (q){
+      nameInput.value = q;
+      // auto start with the query param
+      // We intentionally do not ask; we auto-run startWithName
+      startWithName(q, true);
+    }
+  });
+
+  // Accessibility: expose status messages to screen readers (we used aria-live)
+})();
+</script>
+</body>
+</html>
