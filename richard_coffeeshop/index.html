@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Coffee Shop Orders Dashboard</title>
+  <!-- Self-contained single-file app: Tailwind via CDN, vanilla JS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 min-h-screen p-6">
+  <div class="max-w-6xl mx-auto">
+    <header class="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      <h1 class="text-3xl font-bold">☕ Coffee Shop Orders</h1>
+      <div class="flex items-center gap-3 flex-wrap">
+        <label for="refresh" class="text-sm text-gray-700">Auto-refresh:</label>
+        <select id="refresh" class="text-sm border rounded-lg px-2 py-1 bg-gray-50">
+          <option value="off">Off</option>
+          <option value="5">5s</option>
+          <option value="10">10s</option>
+          <option value="30">30s</option>
+          <option value="60">60s</option>
+        </select>
+        <button id="addDemo" class="px-3 py-1 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-700">+ Add Demo Order</button>
+        <span id="count" class="text-sm text-gray-600"></span>
+      </div>
+    </header>
+
+    <!-- Summary Bar -->
+    <div id="summary" class="mb-6 grid grid-cols-1 sm:grid-cols-3 gap-4"></div>
+
+    <!-- Alerts Panel -->
+    <div id="alerts" class="mb-6"></div>
+
+    <!-- Smart Assistant (model-agnostic heuristics) -->
+    <div id="assistant" class="mb-6"></div>
+
+    <!-- Orders Grid -->
+    <div id="orders" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+  </div>
+
+  <script>
+    // --- Demo data ---
+    const orders = [
+      { id: 101, customer: "Alice",   items: ["Latte", "Croissant"],         status: "Waiting",     paymentMethod: "Card", timestamp: "2025-09-26T09:12:00", price: 8.5 },
+      { id: 102, customer: "Bob",     items: ["Cappuccino"],                  status: "In Progress", paymentMethod: "Cash", timestamp: "2025-09-26T09:18:00", price: 4.5 },
+      { id: 103, customer: "Charlie", items: ["Espresso", "Blueberry Muffin"],status: "Ready",       paymentMethod: "UPI",  timestamp: "2025-09-26T09:05:00", price: 7 }
+    ];
+
+    const STATUSES  = ["Waiting", "In Progress", "Ready"];
+    const CUSTOMERS = ["Alice", "Bob", "Charlie", "Dana", "Eve", "Frank"];
+    const DRINKS    = ["Latte", "Cappuccino", "Espresso", "Flat White", "Mocha", "Americano"];
+    const PASTRIES  = ["Croissant", "Muffin", "Danish", "Scone", "Bagel", "Blueberry Muffin"];
+    const SNACKS    = ["Brownie", "Cookie", "Granola Bar"];
+    const PAYMENTS  = ["Cash", "Card", "UPI"];
+
+    // Persistent alert log for events like cancellations
+    const alertLog = []; // {type, msg, ts}
+
+    let refreshInterval = null;
+
+    // --- Utils ---
+    const randomItem = (arr) => arr[Math.floor(Math.random() * arr.length)];
+    function randomPrice() { return (Math.floor(Math.random() * 6) + 3) + (Math.random() > 0.5 ? 0.5 : 0); }
+
+    function statusClasses(status) {
+      switch (status) {
+        case "Waiting":     return "bg-yellow-100 text-yellow-800 border-yellow-200";
+        case "In Progress": return "bg-blue-100 text-blue-800 border-blue-200";
+        case "Ready":       return "bg-green-100 text-green-800 border-green-200";
+        default:             return "bg-gray-100 text-gray-800 border-gray-200";
+      }
+    }
+    function paymentClasses(method) {
+      switch (method) {
+        case "Cash": return "bg-amber-50 text-amber-800 border-amber-200";
+        case "Card": return "bg-indigo-50 text-indigo-800 border-indigo-200";
+        case "UPI":  return "bg-teal-50 text-teal-800 border-teal-200";
+        default:      return "bg-gray-50 text-gray-800 border-gray-200";
+      }
+    }
+    function formatTime(ts) {
+      const d = new Date(ts);
+      return d.toLocaleString([], { hour: '2-digit', minute: '2-digit', hour12: true }) + " · " + d.toLocaleDateString();
+    }
+
+    // --- Summary ---
+    function renderSummary() {
+      const summary = document.getElementById("summary");
+      summary.innerHTML = "";
+      const totalOrders  = orders.length;
+      const readyCount   = orders.filter(o => o.status === "Ready").length;
+      const pendingCount = orders.filter(o => o.status !== "Ready").length;
+      const revenue      = orders.reduce((sum, o) => sum + (o.price || 0), 0);
+      const cards = [
+        { label: "Total Orders",    value: totalOrders },
+        { label: "Ready vs Pending",value: `${readyCount} / ${pendingCount}` },
+        { label: "Total Revenue",   value: `$${revenue.toFixed(2)}` }
+      ];
+      cards.forEach(c => {
+        const div = document.createElement("div");
+        div.className = "bg-white shadow rounded-xl p-4 text-center";
+        div.innerHTML = `<div class="text-lg font-bold">${c.value}</div><div class="text-sm text-gray-500">${c.label}</div>`;
+        summary.appendChild(div);
+      });
+    }
+
+    // --- Alerts (operational intelligence) ---
+    function renderAlerts() {
+      const panel = document.getElementById("alerts");
+      panel.innerHTML = "";
+      const now = new Date();
+      const alerts = [];
+
+      // Dynamic alerts computed from current orders
+      orders.forEach(order => {
+        const ageMin = (now - new Date(order.timestamp)) / 60000;
+        if (order.status !== "Ready" && ageMin > 10) {
+          alerts.push({ type: "warning", msg: `Order #${order.id} (${order.customer}) waiting ${Math.round(ageMin)} min.` });
+        }
+        if (order.items.length >= 3) {
+          alerts.push({ type: "info", msg: `Order #${order.id} is a large group order (${order.items.length} items).` });
+        }
+      });
+
+      // Include recent event alerts (e.g., cancellations) from the log (last 15 minutes)
+      const recentLog = alertLog.filter(a => (now - a.ts) / 60000 <= 15);
+      recentLog.forEach(a => alerts.push(a));
+
+      if (alerts.length > 0) {
+        const box = document.createElement("div");
+        box.className = "bg-red-50 border border-red-200 text-red-800 rounded-xl p-4";
+        box.innerHTML = `<h2 class="font-semibold mb-2">⚠ Alerts</h2>`;
+        alerts.forEach(a => {
+          const p = document.createElement("p");
+          p.className = "text-sm mb-1";
+          p.textContent = a.msg;
+          box.appendChild(p);
+        });
+        panel.appendChild(box);
+      }
+    }
+
+    // --- Smart Assistant (heuristics; model-agnostic) ---
+    function renderAssistant() {
+      const panel = document.getElementById("assistant");
+      panel.innerHTML = "";
+      const suggestions = [];
+
+      const queueOrders = orders.filter(o => o.status !== "Ready");
+      const queueCount  = queueOrders.length;
+
+      // Item frequency map
+      const freq = new Map();
+      orders.forEach(o => o.items.forEach(i => freq.set(i, (freq.get(i) || 0) + 1)));
+
+      // Pastry-specific prep suggestion (e.g., Croissant)
+      const croissantCount = freq.get("Croissant") || 0;
+      if (croissantCount >= 3) {
+        suggestions.push(`Consider prepping more croissants — ${croissantCount} ordered, ${queueCount} orders in queue.`);
+      }
+
+      // General pastry load
+      const pastryCount = Array.from(freq.entries()).reduce((s,[k,v]) => s + (PASTRIES.includes(k) ? v : 0), 0);
+      if (pastryCount > 5) suggestions.push(`Pastry demand high — ${pastryCount} pastry items pending.`);
+
+      // Drinks backlog
+      const drinkLoad = Array.from(freq.entries()).reduce((s,[k,v]) => s + (DRINKS.includes(k) ? v : 0), 0);
+      if (drinkLoad >= 6) suggestions.push(`Drinks queue heavy — ${drinkLoad} drinks across ${queueCount} active orders. Consider assigning extra barista capacity.`);
+
+      // Waiting backlog
+      const waiting = orders.filter(o => o.status === "Waiting").length;
+      if (waiting >= 4) suggestions.push(`High backlog: ${waiting} orders are still waiting. Prioritize oldest tickets.`);
+
+      // Low inventory hint (simple heuristic: if one item > half of orders)
+      const top = [...freq.entries()].sort((a,b)=>b[1]-a[1])[0];
+      if (top && top[1] > Math.max(2, Math.ceil(orders.length/2))) {
+        suggestions.push(`Spike detected: “${top[0]}” is trending (${top[1]} orders). Prep ahead to avoid stockouts.`);
+      }
+
+      if (suggestions.length > 0) {
+        const box = document.createElement("div");
+        box.className = "bg-blue-50 border border-blue-200 text-blue-800 rounded-xl p-4";
+        box.innerHTML = `<h2 class="font-semibold mb-2">💡 Smart Assistant</h2>`;
+        suggestions.forEach(s => {
+          const p = document.createElement("p");
+          p.className = "text-sm mb-1";
+          p.textContent = s;
+          box.appendChild(p);
+        });
+        panel.appendChild(box);
+      }
+    }
+
+    // --- Orders Grid ---
+    function renderOrders() {
+      const container = document.getElementById("orders");
+      const count = document.getElementById("count");
+      container.innerHTML = "";
+      count.textContent = `${orders.length} orders`;
+
+      orders.forEach((order, idx) => {
+        const card = document.createElement("article");
+        card.className = "bg-white rounded-2xl shadow p-4 border border-gray-100 flex flex-col gap-3";
+
+        const top = document.createElement("div");
+        top.className = "flex items-start justify-between gap-3";
+
+        const left = document.createElement("div");
+        left.innerHTML = `
+          <div class=\"text-sm text-gray-500\">Order #${order.id}</div>
+          <div class=\"text-lg font-semibold\">${order.customer}</div>
+        `;
+
+        const statusWrap = document.createElement("div");
+        statusWrap.className = "flex items-center gap-2";
+
+        const statusBadge = document.createElement("span");
+        statusBadge.className = `px-2 py-1 text-xs font-medium rounded-full border ${statusClasses(order.status)}`;
+        statusBadge.textContent = order.status;
+
+        const select = document.createElement("select");
+        select.ariaLabel = "Update status";
+        select.className = "text-sm border rounded-lg px-2 py-1 bg-gray-50 focus:ring-2 focus:ring-blue-300";
+        STATUSES.forEach(s => {
+          const opt = document.createElement("option");
+          opt.value = s; opt.textContent = s; if (s === order.status) opt.selected = true; select.appendChild(opt);
+        });
+        select.addEventListener('change', (e) => {
+          order.status = e.target.value;
+          renderAll();
+        });
+
+        const cancelBtn = document.createElement("button");
+        cancelBtn.textContent = "✖";
+        cancelBtn.className = "ml-2 text-red-500 hover:text-red-700 text-sm";
+        cancelBtn.title = "Cancel order";
+        cancelBtn.addEventListener('click', () => {
+          // Log cancellation alert and remove order
+          alertLog.push({ type: 'cancel', msg: `Order #${order.id} (${order.customer}) was cancelled.`, ts: new Date() });
+          orders.splice(idx, 1);
+          renderAll();
+        });
+
+        statusWrap.appendChild(statusBadge);
+        statusWrap.appendChild(select);
+        statusWrap.appendChild(cancelBtn);
+
+        top.appendChild(left);
+        top.appendChild(statusWrap);
+
+        const items = document.createElement("div");
+        items.className = "flex flex-wrap gap-2";
+        order.items.forEach(it => {
+          const chip = document.createElement("span");
+          chip.className = "px-2 py-1 text-xs bg-gray-100 text-gray-800 rounded-full";
+          chip.textContent = it;
+          items.appendChild(chip);
+        });
+
+        const bottom = document.createElement("div");
+        bottom.className = "flex items-center justify-between text-sm text-gray-600";
+
+        const pay = document.createElement("span");
+        pay.className = `px-2 py-1 rounded-full border ${paymentClasses(order.paymentMethod)}`;
+        pay.textContent = order.paymentMethod;
+
+        const time = document.createElement("time");
+        time.dateTime = order.timestamp;
+        time.textContent = formatTime(order.timestamp);
+
+        bottom.appendChild(pay);
+        bottom.appendChild(time);
+
+        card.appendChild(top);
+        card.appendChild(items);
+        card.appendChild(bottom);
+
+        container.appendChild(card);
+      });
+    }
+
+    // --- App orchestrator ---
+    function renderAll() {
+      renderSummary();
+      renderAlerts();
+      renderAssistant();
+      renderOrders();
+    }
+
+    function addDemoOrder() {
+      const id = Math.floor(Math.random() * 1000) + 200;
+      const customer = randomItem(CUSTOMERS);
+      const items = [randomItem(DRINKS), randomItem(PASTRIES), Math.random() > 0.5 ? randomItem(SNACKS) : null].filter(Boolean);
+      const status = randomItem(STATUSES);
+      const paymentMethod = randomItem(PAYMENTS);
+      const timestamp = new Date().toISOString();
+      const price = randomPrice();
+      orders.push({ id, customer, items, status, paymentMethod, timestamp, price });
+      renderAll();
+    }
+
+    function setAutoRefresh(intervalSec) {
+      if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; }
+      if (intervalSec && intervalSec !== "off") {
+        refreshInterval = setInterval(() => { renderAll(); }, intervalSec * 1000);
+      }
+    }
+
+    // --- Event wiring ---
+    document.getElementById("addDemo").addEventListener("click", addDemoOrder);
+    document.getElementById("refresh").addEventListener("change", (e) => {
+      const val = e.target.value;
+      if (val === "off") setAutoRefresh(null); else setAutoRefresh(parseInt(val, 10));
+    });
+
+    // Initial render
+    renderAll();
+  </script>
+</body>
+</html>
